@@ -4,6 +4,20 @@ Works out initial conditions, their first derivatives, and final conditions for
 switched linear circuits — the `x(0⁺)`, `dx/dt(0⁺)`, `x(∞)` questions — and
 shows the working.
 
+**Use it in a browser: <https://ryanm2210.github.io/zero-plus/>** — no install,
+no account, works offline once loaded.
+
+```bash
+git clone https://github.com/RYANM2210/zero-plus.git
+```
+
+Every push runs both solvers against each other on hundreds of random circuits
+and publishes the page only if they agree — see [the build
+workflow](.github/workflows/build.yml). The latest downloads are also on that
+site: [the app on its own](https://ryanm2210.github.io/zero-plus/zero-plus-offline.html),
+[the command line solver](https://ryanm2210.github.io/zero-plus/zeroplus.pyz),
+and [everything zipped](https://ryanm2210.github.io/zero-plus/zero-plus.zip).
+
 There are two front ends over one method: a **schematic editor in the browser**
 (`web/`) and a **command line tool** (`solve.py`). They implement the same
 algorithm in Python and JavaScript, and a test step compares them value by value
