@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+
+# Built by package.py and by CI; never hand-edited, so not worth tracking.
+dist/
+
+# Regenerated on every test run.
+tests/corpus.json
+tests/corpus_fuzz.json
+tests/results_*.json
+
+# web/fonts.css is generated too, but it IS tracked on purpose: it is the only
+# thing that needs a network to produce, and keeping it means the build and CI
+# never reach outside.

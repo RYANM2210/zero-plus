@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zero Plus</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chivo:wght@700;900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="masthead">
+  <div class="wordmark">
+    <h1>Zero Plus</h1>
+    <p>Initial &amp; final conditions, worked out</p>
+  </div>
+  <div class="actions">
+    <button class="btn" type="button" id="btn-example">Lecture example</button>
+    <button class="btn" type="button" id="btn-export">Netlist</button>
+    <button class="btn" type="button" id="btn-save">Save / restore</button>
+    <button class="btn" type="button" id="btn-clear" data-variant="quiet">Clear</button>
+    <button class="btn" type="button" id="btn-solve" data-variant="primary">Solve</button>
+  </div>
+</header>
+
+<main>
+  <div class="workspace">
+    <nav class="rail" id="rail" aria-label="Parts"></nav>
+
+    <section class="stage" aria-label="Schematic">
+      <div class="stage-bar">
+        <span class="hint" id="stage-hint">Click to select, drag to move.</span>
+        <span class="spacer"></span>
+        <span id="overlay-controls" hidden>
+          <label class="toggle">
+            <input type="checkbox" id="show-voltages">
+            Node voltages at
+          </label>
+          <select id="overlay-phase" aria-label="Which stage to show on the schematic"></select>
+        </span>
+      </div>
+      <div class="canvas-wrap">
+        <svg id="canvas" preserveAspectRatio="xMidYMid meet" role="application"
+             aria-label="Schematic grid"></svg>
+      </div>
+    </section>
+
+    <aside class="inspector" aria-label="Part settings">
+      <h2>Selected part</h2>
+      <div id="inspector-body"></div>
+    </aside>
+  </div>
+
+  <div class="results" id="results"></div>
+</main>
+
+<dialog id="io-dialog">
+  <div class="dialog-body">
+    <h2 id="io-title">Netlist</h2>
+    <p id="io-message"></p>
+    <textarea id="io-text" spellcheck="false"></textarea>
+  </div>
+  <div class="dialog-foot">
+    <button class="btn" type="button" id="io-close">Close</button>
+    <button class="btn" type="button" id="io-accept" data-variant="primary">Load</button>
+  </div>
+</dialog>
+
+<script src="solver.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

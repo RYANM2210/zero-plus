@@ -1,0 +1,6 @@
+.title Example 2 - find initial conditions
+R1 1 2 5
+C1 1 0 1/5
+L1 2 0 2
+I1 0 1 step 4
+I2 0 2 dc 6

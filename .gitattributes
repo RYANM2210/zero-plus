@@ -1,0 +1,8 @@
+# Normalise to LF in the repository. The page is built on Linux in CI and
+# edited on Windows, and without this every file churns line endings between
+# the two.
+* text=auto eol=lf
+
+*.pyz binary
+*.zip binary
+*.woff2 binary
