@@ -21,7 +21,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DIST = os.path.join(HERE, "dist")
 SOLVER = os.path.join(HERE, "solver")
 
-MODULES = ["exact.py", "circuit.py", "mna.py", "analysis.py", "report.py"]
+MODULES = ["exact.py", "circuit.py", "mna.py", "analysis.py", "report.py",
+           "dynamics.py", "phasor.py"]
 
 # Inside a zipapp the archive root is on sys.path, so the solver modules sit
 # at the top level and keep importing each other by plain name.
@@ -179,8 +180,10 @@ SOURCE_TREE = [
     "README.md", "solve.py", "run_tests.py", "build.py", "package.py",
     "fetch_fonts.py", ".gitignore",
     "solver/exact.py", "solver/circuit.py", "solver/mna.py",
-    "solver/analysis.py", "solver/report.py",
-    "web/index.html", "web/style.css", "web/solver.js", "web/app.js",
+    "solver/analysis.py", "solver/report.py", "solver/dynamics.py",
+    "solver/phasor.py",
+    "web/index.html", "web/style.css", "web/solver.js", "web/extras.js",
+    "web/app.js",
     "web/fonts.css",
     "tests/test_cases.py", "tests/crosscheck.py", "tests/dump.py",
     "tests/dump.js", "tests/fuzz.py", "tests/ex2.net",

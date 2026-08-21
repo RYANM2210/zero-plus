@@ -5,27 +5,37 @@ solver, so the working and the answers cannot drift apart.
 """
 
 from circuit import UNITS, is_ground
+from dynamics import DAMPING_LABELS
 from exact import format_number
 
-PHASE_ORDER = ["t<0", "0+", "d/dt", "inf"]
+PHASE_ORDER = ["t<0", "0+", "d/dt", "d2/dt2", "d3/dt3", "inf"]
 PHASE_HEADING = {
     "t<0": "t < 0  --  steady state before switching",
     "0+": "t = 0+  --  the instant after switching",
     "d/dt": "d/dt at t = 0+  --  the same equations, differentiated",
+    "d2/dt2": "d2/dt2 at t = 0+  --  differentiated a second time",
+    "d3/dt3": "d3/dt3 at t = 0+  --  differentiated a third time",
     "inf": "t -> infinity  --  steady state long after switching",
 }
+DERIVATIVE_PHASES = {"d/dt": 1, "d2/dt2": 2, "d3/dt3": 3}
 
 
 def unit(element, quantity, phase):
     base = "V" if quantity == "v" else "A"
-    return base + "/s" if phase == "d/dt" else base
+    order = DERIVATIVE_PHASES.get(phase)
+    if not order:
+        return base
+    return base + "/s" + ("" if order == 1 else str(order))
 
 
 def quantity_name(element, quantity, phase):
     symbol = "v" if quantity == "v" else "i"
     label = "%s_%s" % (symbol, element.name)
-    if phase == "d/dt":
+    order = DERIVATIVE_PHASES.get(phase)
+    if order == 1:
         return "d%s/dt(0+)" % label
+    if order:
+        return "d%d%s/dt%d(0+)" % (order, label, order)
     suffix = {"t<0": "(0-)", "0+": "(0+)", "inf": "(inf)"}[phase]
     return label + suffix
 
@@ -97,8 +107,8 @@ def render(result, show_equations=True):
         if key == "0+":
             _continuity_block(result, add)
 
-        if key == "d/dt":
-            _derivative_block(result, add)
+        if key in DERIVATIVE_PHASES:
+            _derivative_block(result, add, DERIVATIVE_PHASES[key])
 
     add("")
     add("=" * 72)
@@ -112,7 +122,141 @@ def render(result, show_equations=True):
         add("The quantities these questions usually ask for:")
         _classic_answers(result, add)
 
+    if result.dynamics is not None and result.dynamics.order:
+        _dynamics_block(result, add)
+
+    if result.ac is not None:
+        _ac_block(result, add)
+
     return "\n".join(out)
+
+
+def _ac_block(result, add):
+    """AC steady state at one frequency, in exact complex arithmetic."""
+    report = result.ac
+    circuit = result.circuit
+    add("")
+    add("=" * 72)
+    add("AC STEADY STATE")
+    add("=" * 72)
+    add("")
+    add("  Angular frequency omega = %s rad/s" % format_number(report.omega))
+    add("  Every impedance below is exact. Only the magnitude and angle of "
+        "each")
+    add("  answer are rounded, and the rectangular form beside them is not.")
+
+    for note in report.notes:
+        add("  * " + _wrap(note, 68, "    "))
+
+    add("")
+    add("  Source phasors:")
+    for element in circuit.of_kind("V", "I"):
+        phasor = report.phasors[element.name]
+        add("    %-6s %-18s = %s" % (element.name, phasor.rectangular(),
+                                     phasor.polar()))
+
+    add("")
+    add("  Impedances:")
+    for element in circuit.of_kind("R", "L", "C"):
+        from phasor import impedance
+        z = impedance(element, report.omega)
+        add("    Z(%-4s) = %-18s = %s" % (element.name, z.rectangular(),
+                                          z.polar()))
+    for name, z in report.impedances.items():
+        add("    seen by %-4s = %-16s = %s" % (name, z.rectangular(), z.polar()))
+
+    add("")
+    add("  Node voltages:")
+    for node in circuit.nodes:
+        if is_ground(node):
+            continue
+        value = report.solution.node_voltage(node)
+        add("    V(%-3s) = %-20s = %s" % (node, value.rectangular(),
+                                          value.polar()))
+
+    add("")
+    add("  Branch quantities:")
+    rows = [["element", "V (rect)", "V (polar)", "I (rect)", "I (polar)"]]
+    for element in circuit.elements:
+        voltage = report.solution.element_voltage(element)
+        current = report.solution.element_current(element)
+        rows.append([element.name, voltage.rectangular(), voltage.polar(),
+                     current.rectangular(), current.polar()])
+    widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]))]
+    for index, row in enumerate(rows):
+        add("    " + "  ".join(cell.ljust(widths[i])
+                               for i, cell in enumerate(row)))
+        if index == 0:
+            add("    " + "  ".join("-" * width for width in widths))
+
+
+def _dynamics_block(result, add):
+    """Natural frequencies, damping, and the complete response."""
+    dynamics = result.dynamics
+    add("")
+    add("=" * 72)
+    add("HOW IT GETS THERE")
+    add("=" * 72)
+    add("")
+    add("  This is an order %d circuit." % dynamics.order)
+
+    if dynamics.order == 1:
+        add("  One time constant, so the approach is a plain exponential.")
+        if dynamics.tau is not None:
+            add("    tau = %s s" % dynamics.tau)
+            add("    natural frequency s = %s per second" % dynamics.roots[0])
+    elif dynamics.order == 2:
+        add("  Characteristic equation:  s^2 + 2*alpha*s + omega0^2 = 0")
+        add("    alpha    = %s" % format_number(dynamics.alpha))
+        add("    omega0^2 = %s" % format_number(dynamics.omega0_squared))
+        if dynamics.omega0 is not None:
+            add("    omega0   = %s rad/s" % dynamics.omega0)
+        if dynamics.zeta is not None:
+            add("    zeta     = %s" % dynamics.zeta)
+        add("    alpha^2 - omega0^2 = %s" % format_number(dynamics.discriminant))
+        add("")
+        add("  The sign of that discriminant decides the damping. It is an "
+            "exact")
+        add("  comparison, so the classification cannot be a rounding "
+            "artefact.")
+        add("")
+        add("    ->  %s" % DAMPING_LABELS[dynamics.damping].upper())
+        add("")
+        if dynamics.damping == "underdamped":
+            add("    roots  s = -%s +/- j%s"
+                % (format_number(dynamics.alpha), dynamics.omega_d))
+            add("    damped frequency omega_d = %s rad/s" % dynamics.omega_d)
+        elif dynamics.damping == "critical":
+            add("    repeated root  s = %s" % dynamics.roots[0])
+        else:
+            add("    roots  s1 = %s,  s2 = %s"
+                % (dynamics.roots[0], dynamics.roots[1]))
+    else:
+        add("  Characteristic polynomial, highest power of s first:")
+        add("    " + ", ".join(format_number(c) for c in dynamics.polynomial))
+
+    if not result.responses:
+        return
+
+    add("")
+    add("  Complete response, forced value plus natural response:")
+    add("")
+    approximate = False
+    for element in result.circuit.elements:
+        forms = result.responses.get(element.name)
+        if not forms:
+            continue
+        for quantity in ("v", "i"):
+            form = forms.get(quantity)
+            if form is None:
+                continue
+            add("    " + form.formula)
+            approximate = approximate or not form.exact
+    if approximate:
+        add("")
+        add("  Where a root is irrational its constants are given to six "
+            "figures.")
+        add("  alpha, omega0^2 and the damping stay exact regardless.")
 
 
 def _element_line(element):
@@ -181,31 +325,36 @@ def _continuity_block(result, add):
                 % (element.name, element.name, format_number(value), origin))
 
 
-def _derivative_block(result, add):
+def _derivative_block(result, add, order=1):
+    """Each order is driven by the one before it, so name that source."""
     circuit = result.circuit
     storage = circuit.of_kind("L", "C")
     if not storage:
         return
+    source_key = "0+" if order == 1 else PHASE_ORDER[order]
+    source = result.phases[source_key].solution
+    lower = "" if order == 1 else "^%d" % (order - 1)
+    prime = "" if order == 1 else "^%d" % order
     add("")
     add("  Where the driving values came from:")
-    zero_plus = result.phases["0+"].solution
     for element in storage:
-        derivative = result.derivative_storage[element.name]
+        derivative = result.derivative_storage[order][element.name]
         if element.kind == "L":
-            add("    di_%s/dt(0+) = v_%s(0+)/L = %s / %s = %s A/s"
-                % (element.name, element.name,
-                   format_number(zero_plus.element_voltage(element)),
+            add("    d%si_%s/dt%s = (d%sv_%s/dt%s) / L = %s / %s = %s"
+                % (prime, element.name, prime, lower, element.name, lower,
+                   format_number(source.element_voltage(element)),
                    format_number(element.value), format_number(derivative)))
         else:
-            add("    dv_%s/dt(0+) = i_%s(0+)/C = %s / %s = %s V/s"
-                % (element.name, element.name,
-                   format_number(zero_plus.element_current(element)),
+            add("    d%sv_%s/dt%s = (d%si_%s/dt%s) / C = %s / %s = %s"
+                % (prime, element.name, prime, lower, element.name, lower,
+                   format_number(source.element_current(element)),
                    format_number(element.value), format_number(derivative)))
 
 
 def _answer_table(result, add):
     columns = [key for key in PHASE_ORDER if key in result.phases]
     headers = {"t<0": "t < 0", "0+": "t = 0+", "d/dt": "d/dt at 0+",
+               "d2/dt2": "d2/dt2 at 0+", "d3/dt3": "d3/dt3 at 0+",
                "inf": "t -> inf"}
 
     rows = [["element", "quantity"] + [headers[key] for key in columns]]

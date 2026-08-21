@@ -5,9 +5,9 @@ const fs = require('fs');
 const path = require('path');
 
 const HERE = __dirname;
-const solver = require(path.join(HERE, '..', 'web', 'solver.js')).CircuitSolver;
+const solver = require(path.join(HERE, '..', 'web', 'extras.js')).CircuitSolver;
 
-const PHASES = ['t<0', '0+', 'd/dt', 'inf'];
+const PHASES = ['t<0', '0+', 'd/dt', 'd2/dt2', 'inf'];
 
 function exact(q) { return q.n + '/' + q.d; }
 
@@ -43,6 +43,52 @@ function dumpOne(netlist) {
     });
     out.phases[key] = entry;
   });
+
+  const d = result.dynamics;
+  if (d && d.order) {
+    out.dynamics = {
+      order: d.order,
+      damping: d.damping || '',
+      alpha: d.alpha ? exact(d.alpha) : '',
+      omega0sq: d.omega0Squared ? exact(d.omega0Squared) : '',
+      disc: d.discriminant ? exact(d.discriminant) : '',
+      stable: !!d.stable,
+      poly: d.polynomial.map(exact),
+      tau: d.tau ? String(d.tau) : '',
+      roots: d.roots.map(function (r) { return String(r); })
+    };
+    out.responses = {};
+    Object.keys(result.responses).forEach(function (name) {
+      const forms = {};
+      Object.keys(result.responses[name]).forEach(function (q) {
+        forms[q] = result.responses[name][q].formula;
+      });
+      out.responses[name] = forms;
+    });
+  }
+
+  if (result.ac) {
+    const nodes = {};
+    circuit.nodes().forEach(function (node) {
+      const value = result.ac.solution.nodeVoltage(node);
+      nodes[node] = exact(value.re) + '|' + exact(value.im);
+    });
+    const branches = {};
+    circuit.elements.forEach(function (element) {
+      const v = result.ac.solution.elementVoltage(element);
+      const i = result.ac.solution.elementCurrent(element);
+      branches[element.name] = {
+        v: exact(v.re) + '|' + exact(v.im),
+        i: exact(i.re) + '|' + exact(i.im)
+      };
+    });
+    const z = {};
+    Object.keys(result.ac.impedances).forEach(function (n) {
+      const value = result.ac.impedances[n];
+      z[n] = exact(value.re) + '|' + exact(value.im);
+    });
+    out.ac = { omega: exact(result.ac.omega), nodes: nodes, branches: branches, z: z };
+  }
   return out;
 }
 

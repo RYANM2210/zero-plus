@@ -99,6 +99,17 @@ def make_circuit(rng):
     if not any(" 0 " in (" " + line + " ") for line in lines):
         lines.append("R%d 0 1 %s" % (counters.get("R", 0) + 1, pick_value(rng)))
 
+    # Give some circuits an AC frequency so the complex solver gets fuzzed too,
+    # and vary the source phases across the quarter turns that stay exact.
+    if rng.random() < 0.45:
+        omega = rng.choice(["1", "2", "1/2", "5", "10", "3/7", "100"])
+        for index, line in enumerate(lines):
+            head = line.split()[0]
+            if head[0] in ("V", "I") and rng.random() < 0.5:
+                lines[index] = "%s ac=%s phase=%s" % (
+                    line, pick_value(rng), rng.choice(["0", "90", "180", "270"]))
+        lines.insert(0, ".ac %s" % omega)
+
     return "\n".join(lines) + "\n"
 
 

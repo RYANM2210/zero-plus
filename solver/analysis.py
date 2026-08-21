@@ -1,6 +1,6 @@
-"""The initial- and final-condition procedure.
+"""The initial- and final-condition procedure, and what follows from it.
 
-Four solves, in this order:
+The core is four solves, in this order:
 
   1. t < 0      steady state of the pre-switch circuit.  L is a short, C is an
                 open.  This is where i_L(0-) and v_C(0-) come from.
@@ -20,14 +20,27 @@ Four solves, in this order:
   4. t -> inf   steady state of the post-switch circuit, L short, C open again.
 
 Steps 1 and 4 are the same code with a different time window; steps 2 and 3 are
-the same matrix with a different right-hand side.
+the same matrix with a different right-hand side.  Step 3 repeats for as many
+orders as asked for, each order feeding the next.
+
+Once those are done, dynamics.py recovers the state matrix by probing the same
+t = 0+ system, which gives the natural frequencies and the damping, and the
+values already computed at 0+, its slope, and infinity are exactly the three
+constants a closed-form response needs.
 """
 
 from fractions import Fraction
 
 from circuit import is_ground
+from dynamics import analyse_dynamics, response_for
 from exact import SingularSystem
 from mna import MnaSystem
+
+# How many derivatives at 0+ to work out. Two covers second-order circuits,
+# which is as far as the closed-form response goes.
+DEFAULT_DERIVATIVE_ORDER = 2
+
+DERIVATIVE_KEYS = {1: "d/dt", 2: "d2/dt2", 3: "d3/dt3"}
 
 
 class AnalysisError(Exception):
@@ -49,6 +62,9 @@ class Phase(object):
         return self.solution.rhs
 
 
+PHASE_KEYS = ["t<0", "0+", "d/dt", "d2/dt2", "d3/dt3", "inf"]
+
+
 class Result(object):
     """Everything the four solves produced, indexed for easy reporting."""
 
@@ -57,6 +73,10 @@ class Result(object):
         self.phases = {}
         self.initial_conditions = {}
         self.ic_sources = {}
+        self.derivative_storage = {}
+        self.dynamics = None
+        self.responses = {}
+        self.ac = None
         self.notes = []
 
     def add(self, phase):
@@ -84,7 +104,7 @@ class Result(object):
         rows = []
         for element in self.circuit.elements:
             row = {"element": element, "cells": {}}
-            for key in ("t<0", "0+", "d/dt", "inf"):
+            for key in PHASE_KEYS:
                 phase = self.phases.get(key)
                 if phase is None:
                     row["cells"][key] = None
@@ -97,7 +117,7 @@ class Result(object):
         return rows
 
 
-def analyse(circuit):
+def analyse(circuit, max_derivative_order=DEFAULT_DERIVATIVE_ORDER):
     circuit.validate()
     result = Result(circuit)
     storage = circuit.of_kind("L", "C")
@@ -146,25 +166,31 @@ def analyse(circuit):
     result.add(Phase("0+", "The instant after switching", zero_plus_system,
                      zero_plus, _describe_ic(circuit, result.initial_conditions)))
 
-    # ---- phase 3: derivatives at 0+ --------------------------------------
-    derivative_storage = {}
-    for element in storage:
-        if element.kind == "L":
-            # di_L/dt = v_L / L
-            derivative_storage[element.name] = (
-                zero_plus.element_voltage(element) / element.value)
-        else:
-            # dv_C/dt = i_C / C
-            derivative_storage[element.name] = (
-                zero_plus.element_current(element) / element.value)
-
-    # Sources are constant for t > 0, so every source derivative is zero.
+    # ---- phase 3: derivatives at 0+, to as many orders as asked for -------
+    # Each order feeds the next. The n-th derivative of an inductor current is
+    # the (n-1)-th derivative of its voltage over L, and the same for a
+    # capacitor with its current over C, so one loop covers every order.
     zero_sources = {e.name: Fraction(0) for e in circuit.of_kind("V", "I")}
-    derivatives = _solve_or_explain(zero_plus_system, zero_sources,
-                                    derivative_storage, "derivatives at 0+")
-    result.add(Phase("d/dt", "First derivatives at t = 0+", zero_plus_system,
-                     derivatives, _describe_derivative(circuit, derivative_storage)))
-    result.derivative_storage = derivative_storage
+    previous = zero_plus
+    for order in range(1, max_derivative_order + 1):
+        storage_values = {}
+        for element in storage:
+            if element.kind == "L":
+                storage_values[element.name] = (
+                    previous.element_voltage(element) / element.value)
+            else:
+                storage_values[element.name] = (
+                    previous.element_current(element) / element.value)
+
+        key = DERIVATIVE_KEYS[order]
+        label = ("First derivatives at t = 0+" if order == 1
+                 else "Derivative %d at t = 0+" % order)
+        solution = _solve_or_explain(zero_plus_system, zero_sources,
+                                     storage_values, "derivatives at 0+")
+        result.add(Phase(key, label, zero_plus_system, solution,
+                         _describe_derivative(circuit, storage_values, order)))
+        result.derivative_storage[order] = storage_values
+        previous = solution
 
     # ---- phase 4: t -> infinity ------------------------------------------
     final_system = MnaSystem(circuit, "after", "dc")
@@ -178,6 +204,40 @@ def analyse(circuit):
             "circuit does not settle to fixed values, which is what an "
             "integrator or a source-free floating node looks like."
             % diagnose(final_system, error))
+
+    # ---- natural frequencies and the closed-form response ------------------
+    if storage:
+        result.dynamics = analyse_dynamics(circuit, zero_plus_system,
+                                           _source_values(circuit, "after"))
+        result.notes.extend(result.dynamics.notes)
+        if result.dynamics.damping and "inf" in result.phases:
+            for element in circuit.elements:
+                forms = {}
+                for quantity in ("v", "i"):
+                    form = response_for(
+                        result.dynamics,
+                        "%s_%s" % (quantity, element.name),
+                        "V" if quantity == "v" else "A",
+                        result.value("0+", element.name, quantity),
+                        result.value("d/dt", element.name, quantity),
+                        result.value("inf", element.name, quantity))
+                    if form is not None:
+                        forms[quantity] = form
+                if forms:
+                    result.responses[element.name] = forms
+
+    # ---- AC steady state, only when a frequency was given -----------------
+    if circuit.ac_omega:
+        from circuit import CircuitError
+        from phasor import analyse_ac
+        try:
+            result.ac = analyse_ac(circuit, circuit.ac_omega)
+        except SingularSystem:
+            result.notes.append(
+                "The AC equations at that frequency have no unique solution, "
+                "so no steady state is reported.")
+        except CircuitError as error:
+            result.notes.append("AC steady state was skipped: %s" % error)
 
     return result
 
@@ -235,15 +295,22 @@ def _describe_ic(circuit, initial_conditions):
     return lines
 
 
-def _describe_derivative(circuit, derivative_storage):
-    lines = ["same equations as t = 0+, differentiated once with respect to time",
+def _describe_derivative(circuit, derivative_storage, order=1):
+    times = "once" if order == 1 else "%d times" % order
+    lines = ["same equations as t = 0+, differentiated %s with respect to time"
+             % times,
              "every source is constant for t > 0, so all source terms become 0"]
+    prime = "" if order == 1 else "^%d" % order
     for element in circuit.of_kind("L"):
-        lines.append("%s -> current source of di/dt = v_L(0+)/L = %s A/s"
-                     % (element.name, _fmt(derivative_storage[element.name])))
+        lines.append("%s -> current source of d%si/dt%s = %s A/s%s"
+                     % (element.name, prime, prime,
+                        _fmt(derivative_storage[element.name]),
+                        "" if order == 1 else "^%d" % order))
     for element in circuit.of_kind("C"):
-        lines.append("%s -> voltage source of dv/dt = i_C(0+)/C = %s V/s"
-                     % (element.name, _fmt(derivative_storage[element.name])))
+        lines.append("%s -> voltage source of d%sv/dt%s = %s V/s%s"
+                     % (element.name, prime, prime,
+                        _fmt(derivative_storage[element.name]),
+                        "" if order == 1 else "^%d" % order))
     return lines
 
 

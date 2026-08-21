@@ -111,15 +111,25 @@
     return parseDecimal(text);
   }
 
-  /* Render a value the way a student would write it in an answer. */
+  /* Render a value the way a student would write it in an answer.
+   *
+   * This has to agree with format_number() in ../solver/exact.py character for
+   * character, because the two implementations are compared on their rendered
+   * output as well as their arithmetic. The 10000 cutoff and the %.4f that
+   * follows it are both taken from there.
+   */
+  const MAX_DENOMINATOR = 10000n;
+
   function fmt(value) {
     if (value === null || value === undefined) return '-';
     const q = toQ(value);
     if (q.d === 1n) return String(q.n);
     const decimal = q.toNumber();
-    const short = trimZeros(decimal.toFixed(6));
-    if (short.length <= 8 && parseSimple(short).eq(q)) return short;
-    if (q.d <= 100000n) return q.n + '/' + q.d + ' (' + trimZeros(decimal.toFixed(4)) + ')';
+    if (q.d <= MAX_DENOMINATOR) {
+      const short = trimZeros(decimal.toFixed(6));
+      if (short.length <= 8 && parseSimple(short).eq(q)) return short;
+      return q.n + '/' + q.d + ' (' + decimal.toFixed(4) + ')';
+    }
     return formatSig(decimal, 6);
   }
 
@@ -128,13 +138,18 @@
     return text.replace(/0+$/, '').replace(/\.$/, '');
   }
 
+  /* The equivalent of C's %.<digits>g, which is what Python's %g gives. */
   function formatSig(value, digits) {
     if (value === 0) return '0';
-    const magnitude = Math.abs(value);
-    if (magnitude >= 1e-4 && magnitude < 1e7) {
-      return trimZeros(value.toPrecision(digits));
+    if (!isFinite(value)) return String(value);
+    const exponent = parseInt(value.toExponential(digits - 1).split('e')[1], 10);
+    if (exponent < -4 || exponent >= digits) {
+      const text = value.toExponential(digits - 1)
+        .replace(/\.?0+e/, 'e')            // %g drops trailing zeros
+        .replace(/e([+-])(\d)$/, 'e$10$2'); // and pads the exponent to two
+      return text;
     }
-    return value.toExponential(Math.max(0, digits - 1)).replace(/e([+-])(\d)$/, 'e$1$2');
+    return trimZeros(value.toPrecision(digits));
   }
 
   // ------------------------------------------------------------------- errors
@@ -249,6 +264,9 @@
     this.stateBefore = spec.stateBefore || null;
     this.stateAfter = spec.stateAfter || null;
     this.ic = spec.ic == null ? null : toQ(spec.ic);
+    // AC phasor, used only by the steady-state analysis.
+    this.ac = spec.ac == null ? null : toQ(spec.ac);
+    this.phase = spec.phase == null ? null : toQ(spec.phase);
   }
 
   Element.prototype.pretty = function () { return PRETTY_KIND[this.kind] || this.kind; };
@@ -263,6 +281,7 @@
     this.title = title || 'circuit';
     this.elements = [];
     this.byName = {};
+    this.acOmega = null;   // rad/s, set by a .ac line
   }
 
   Circuit.prototype.add = function (element) {
@@ -434,6 +453,15 @@
         circuit.title = line.slice(7).trim();
         continue;
       }
+      if (line.toLowerCase().indexOf('.ac ') === 0) {
+        try {
+          circuit.acOmega = toQ(line.slice(4).trim());
+        } catch (error) {
+          throw new CircuitError('line ' + (index + 1)
+            + ': .ac needs a frequency in rad/s');
+        }
+        continue;
+      }
       if (line.charAt(0) === '.') continue;
       const tokens = line.split(/\s+/);
       const name = tokens[0];
@@ -452,10 +480,18 @@
           }));
         } else if (kind === 'V' || kind === 'I') {
           if (rest.length < 3) throw new CircuitError(name + ' needs two nodes and a value');
-          const pair = parseSourceSpec(name, rest.slice(2));
+          let ac = null, phase = null;
+          const body = [];
+          rest.slice(2).forEach(function (token) {
+            const lowered = token.toLowerCase();
+            if (lowered.indexOf('ac=') === 0) ac = toQ(token.slice(3));
+            else if (lowered.indexOf('phase=') === 0) phase = toQ(token.slice(6));
+            else body.push(token);
+          });
+          const pair = parseSourceSpec(name, body);
           circuit.add(new Element({
             kind: kind, name: name, nodes: rest.slice(0, 2),
-            before: pair[0], after: pair[1]
+            before: pair[0], after: pair[1], ac: ac, phase: phase
           }));
         } else if (kind === 'SW') {
           if (rest.length !== 4) {
@@ -494,6 +530,7 @@
 
   function toNetlist(circuit) {
     const lines = ['.title ' + circuit.title];
+    if (circuit.acOmega !== null) lines.push('.ac ' + circuit.acOmega.toString());
     circuit.elements.forEach(function (e) {
       let row;
       if (['R', 'L', 'C'].indexOf(e.kind) !== -1) {
@@ -505,6 +542,8 @@
         else if (e.before.isZero()) spec = 'step ' + e.after.toString();
         else spec = e.before.toString() + ' ' + e.after.toString();
         row = [e.name, e.nodes[0], e.nodes[1], spec].join(' ');
+        if (e.ac !== null) row += ' ac=' + e.ac.toString();
+        if (e.phase !== null) row += ' phase=' + e.phase.toString();
       } else if (e.kind === 'SW') {
         row = [e.name, e.nodes[0], e.nodes[1], e.stateBefore, e.stateAfter].join(' ');
       } else if (e.kind === 'E' || e.kind === 'G') {
@@ -825,7 +864,9 @@
   AnalysisError.prototype = Object.create(Error.prototype);
   AnalysisError.prototype.constructor = AnalysisError;
 
-  const PHASE_ORDER = ['t<0', '0+', 'd/dt', 'inf'];
+  const PHASE_ORDER = ['t<0', '0+', 'd/dt', 'd2/dt2', 'd3/dt3', 'inf'];
+  const DERIVATIVE_KEYS = { 1: 'd/dt', 2: 'd2/dt2', 3: 'd3/dt3' };
+  const DEFAULT_DERIVATIVE_ORDER = 2;
 
   function sourceValues(circuit, window) {
     const out = {};
@@ -833,8 +874,9 @@
     return out;
   }
 
-  function analyse(circuit) {
+  function analyse(circuit, maxDerivativeOrder) {
     circuit.validate();
+    maxDerivativeOrder = maxDerivativeOrder || DEFAULT_DERIVATIVE_ORDER;
     const storage = circuit.ofKind('L', 'C');
     const result = {
       circuit: circuit,
@@ -842,6 +884,9 @@
       initialConditions: {},
       icSources: {},
       derivativeStorage: {},
+      dynamics: null,
+      responses: {},
+      ac: null,
       notes: []
     };
 
@@ -901,27 +946,36 @@
       description: describeIc(circuit, result.initialConditions)
     };
 
-    // phase 3: derivatives at 0+
-    storage.forEach(function (element) {
-      result.derivativeStorage[element.name] = element.kind === 'L'
-        ? zeroPlus.elementVoltage(element).div(element.value)
-        : zeroPlus.elementCurrent(element).div(element.value);
-    });
+    // phase 3: derivatives at 0+, each order feeding the next
     const zeroSources = {};
     circuit.ofKind('V', 'I').forEach(function (e) { zeroSources[e.name] = ZERO; });
-    let derivatives;
-    try {
-      derivatives = zeroPlusSystem.solve(zeroSources, result.derivativeStorage);
-    } catch (error) {
-      if (!(error instanceof Singular)) throw error;
-      throw new AnalysisError('While differentiating at 0+: '
-        + diagnose(zeroPlusSystem, error));
+    let previous = zeroPlus;
+    for (let order = 1; order <= maxDerivativeOrder; order++) {
+      const storageValues = {};
+      storage.forEach(function (element) {
+        storageValues[element.name] = element.kind === 'L'
+          ? previous.elementVoltage(element).div(element.value)
+          : previous.elementCurrent(element).div(element.value);
+      });
+      let solution;
+      try {
+        solution = zeroPlusSystem.solve(zeroSources, storageValues);
+      } catch (error) {
+        if (!(error instanceof Singular)) throw error;
+        throw new AnalysisError('While differentiating at 0+: '
+          + diagnose(zeroPlusSystem, error));
+      }
+      const key = DERIVATIVE_KEYS[order];
+      result.phases[key] = {
+        key: key,
+        title: order === 1 ? 'First derivatives at t = 0+'
+          : 'Derivative ' + order + ' at t = 0+',
+        system: zeroPlusSystem, solution: solution,
+        description: describeDerivative(circuit, storageValues, order)
+      };
+      result.derivativeStorage[order] = storageValues;
+      previous = solution;
     }
-    result.phases['d/dt'] = {
-      key: 'd/dt', title: 'First derivatives at t = 0+',
-      system: zeroPlusSystem, solution: derivatives,
-      description: describeDerivative(circuit, result.derivativeStorage)
-    };
 
     // phase 4: t -> infinity
     const finalSystem = new MnaSystem(circuit, 'after', 'dc');
@@ -938,6 +992,50 @@
         + diagnose(finalSystem, error)
         + ' Physically this circuit does not settle to fixed values, which is what '
         + 'an integrator or a source-free floating node looks like.');
+    }
+
+    // Natural frequencies and the closed form, then AC if a frequency is set.
+    // Both live in extras.js, which attaches itself to this same object.
+    if (storage.length && root.CircuitSolver && root.CircuitSolver.analyseDynamics) {
+      result.dynamics = root.CircuitSolver.analyseDynamics(
+        circuit, zeroPlusSystem, sourceValues(circuit, 'after'));
+      result.notes = result.notes.concat(result.dynamics.notes);
+      if (result.dynamics.damping && result.phases.inf) {
+        circuit.elements.forEach(function (element) {
+          const forms = {};
+          ['v', 'i'].forEach(function (quantity) {
+            const phase0 = result.phases['0+'].solution;
+            const phase1 = result.phases['d/dt'].solution;
+            const phaseInf = result.phases.inf.solution;
+            const initial = quantity === 'v'
+              ? phase0.elementVoltage(element) : phase0.elementCurrent(element);
+            const slope = quantity === 'v'
+              ? phase1.elementVoltage(element) : phase1.elementCurrent(element);
+            const final = quantity === 'v'
+              ? phaseInf.elementVoltage(element) : phaseInf.elementCurrent(element);
+            const form = root.CircuitSolver.responseFor(
+              result.dynamics, quantity + '_' + element.name,
+              quantity === 'v' ? 'V' : 'A', initial, slope, final);
+            if (form) forms[quantity] = form;
+          });
+          if (Object.keys(forms).length) result.responses[element.name] = forms;
+        });
+      }
+    }
+
+    if (circuit.acOmega && root.CircuitSolver && root.CircuitSolver.analyseAc) {
+      try {
+        result.ac = root.CircuitSolver.analyseAc(circuit, circuit.acOmega);
+      } catch (error) {
+        if (error instanceof Singular) {
+          result.notes.push('The AC equations at that frequency have no unique '
+            + 'solution, so no steady state is reported.');
+        } else if (error instanceof CircuitError) {
+          result.notes.push('AC steady state was skipped: ' + error.message);
+        } else {
+          throw error;
+        }
+      }
     }
 
     result.value = function (phaseKey, elementName, quantity) {
@@ -997,18 +1095,23 @@
     return lines;
   }
 
-  function describeDerivative(circuit, derivativeStorage) {
+  function describeDerivative(circuit, derivativeStorage, order) {
+    order = order || 1;
+    const times = order === 1 ? 'once' : order + ' times';
+    const prime = order === 1 ? '' : '^' + order;
+    const perSecond = order === 1 ? '/s' : '/s^' + order;
     const lines = [
-      'the same equations as t = 0+, differentiated once with respect to time',
+      'the same equations as t = 0+, differentiated ' + times
+        + ' with respect to time',
       'every source is constant for t > 0, so all source terms become 0'
     ];
     circuit.ofKind('L').forEach(function (e) {
-      lines.push(e.name + ' carries di/dt = v_L(0+)/L = '
-        + fmt(derivativeStorage[e.name]) + ' A/s');
+      lines.push(e.name + ' carries d' + prime + 'i/dt' + prime + ' = '
+        + fmt(derivativeStorage[e.name]) + ' A' + perSecond);
     });
     circuit.ofKind('C').forEach(function (e) {
-      lines.push(e.name + ' holds dv/dt = i_C(0+)/C = '
-        + fmt(derivativeStorage[e.name]) + ' V/s');
+      lines.push(e.name + ' holds d' + prime + 'v/dt' + prime + ' = '
+        + fmt(derivativeStorage[e.name]) + ' V' + perSecond);
     });
     return lines;
   }
@@ -1127,6 +1230,7 @@
     isGround: isGround, PHASE_ORDER: PHASE_ORDER,
     PRETTY_KIND: PRETTY_KIND, UNITS: UNITS,
     CircuitError: CircuitError, AnalysisError: AnalysisError, Singular: Singular,
-    solveLinear: solveLinear
+    solveLinear: solveLinear,
+    formatSig: formatSig
   };
 }(typeof module !== 'undefined' && module.exports ? module.exports : window));

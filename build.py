@@ -49,7 +49,7 @@ def body_of(html):
     return body.strip()
 
 
-def compose(fonts_head, css, body, solver, app):
+def compose(fonts_head, css, body, solver, extras, app):
     return "\n".join([
         "<title>Zero Plus</title>",
         fonts_head,
@@ -61,6 +61,9 @@ def compose(fonts_head, css, body, solver, app):
         "",
         "<script>",
         solver,
+        "</script>",
+        "<script>",
+        extras,
         "</script>",
         "<script>",
         app,
@@ -76,15 +79,17 @@ def main():
     html = read("index.html")
     css = read("style.css").strip()
     solver = read("solver.js").strip()
+    extras = read("extras.js").strip()
     app = read("app.js").strip()
     body = body_of(html)
 
-    for label, source in (("style.css", css), ("solver.js", solver), ("app.js", app)):
+    for label, source in (("style.css", css), ("solver.js", solver),
+                          ("extras.js", extras), ("app.js", app)):
         if "</script>" in source or "</style>" in source:
             raise SystemExit("%s contains a closing tag that would break inlining"
                              % label)
 
-    online = compose(FONT_LINK, css, body, solver, app)
+    online = compose(FONT_LINK, css, body, solver, extras, app)
     size = write(os.path.join(DIST, "zero-plus.html"), online)
     print("dist/zero-plus.html          %6.0f KB   for publishing as an Artifact"
           % (size / 1024.0))
@@ -106,7 +111,7 @@ def main():
         '<meta name="viewport" content="width=device-width, initial-scale=1">',
         "</head>",
         "<body>",
-        compose(embedded, css, body, solver, app),
+        compose(embedded, css, body, solver, extras, app),
         "</body>",
         "</html>",
         ""

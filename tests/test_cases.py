@@ -301,7 +301,15 @@ def run():
             failures.append("%s: was accepted, but it should have been refused"
                             % name)
 
-    print("%d checks across %d circuits" % (total, len(CASES) + len(FAILURES)))
+    extra_checks, extra_failures = run_dynamics()
+    total += extra_checks
+    failures.extend(extra_failures)
+    extra_checks, extra_failures = run_ac()
+    total += extra_checks
+    failures.extend(extra_failures)
+
+    print("%d checks across %d circuits"
+          % (total, len(CASES) + len(FAILURES) + len(DYNAMICS_CASES) + len(AC_CASES)))
     if failures:
         print("\nFAILURES (%d):" % len(failures))
         for line in failures:
@@ -309,6 +317,137 @@ def run():
         return 1
     print("all passed")
     return 0
+
+
+
+
+# --------------------------------------------------------------------------
+# Damping, natural frequencies, and higher derivatives.
+# Every value below was worked out by hand from alpha = R/2L, omega0^2 = 1/LC
+# for the series cases, and from the node equations for the parallel one.
+# --------------------------------------------------------------------------
+
+SERIES = "V1 1 0 step 12\nR1 1 2 %s\nL1 2 3 1\nC1 3 0 1/4\n"
+
+DYNAMICS_CASES = [
+    # name, netlist, order, damping, alpha, omega0^2, discriminant, roots
+    ("series RLC overdamped, R=5", SERIES % "5", 2, "overdamped",
+     Fraction(5, 2), 4, Fraction(9, 4), [-1, -4]),
+    ("series RLC critically damped, R=4", SERIES % "4", 2, "critical",
+     2, 4, 0, [-2, -2]),
+    ("series RLC underdamped, R=2", SERIES % "2", 2, "underdamped",
+     1, 4, -3, None),
+    ("parallel RLC from the lecture", open(os.path.join(HERE, "ex2.net")).read(),
+     2, "underdamped", Fraction(5, 4), Fraction(5, 2), Fraction(-15, 16), None),
+    ("first-order RC, tau = RC", "V1 1 0 step 10\nR1 1 2 2\nC1 2 0 1/4\n",
+     1, "first-order", None, None, None, [Fraction(-2)]),
+    ("first-order RL, tau = L/R", "V1 1 0 step 10\nR1 1 2 4\nL1 2 0 2\n",
+     1, "first-order", None, None, None, [Fraction(-2)]),
+]
+
+TAU_CASES = [
+    ("V1 1 0 step 10\nR1 1 2 2\nC1 2 0 1/4\n", Fraction(1, 2)),
+    ("V1 1 0 step 10\nR1 1 2 4\nL1 2 0 2\n", Fraction(1, 2)),
+]
+
+# Second derivatives at 0+, checked against differentiating the closed form.
+SECOND_DERIVATIVE_CASES = [
+    # critically damped series RLC: v_C(t) = 12 + (-12 - 24t)e^(-2t)
+    # so v_C'' (0+) = 48, and independently (di_L/dt)/C = 12 / (1/4) = 48
+    (SERIES % "4", "C1", "v", 48),
+    # di_L/dt(0+) = 12, and d2i_L/dt2 = (dv_L/dt)/L
+    (SERIES % "4", "L1", "i", -48),
+]
+
+
+def run_dynamics():
+    failures = []
+    checks = 0
+    for (name, netlist, order, damping, alpha, omega0_sq,
+         discriminant, roots) in DYNAMICS_CASES:
+        result = analyse(parse_netlist(netlist))
+        d = result.dynamics
+        for label, got, want in [("order", d.order, order),
+                                 ("damping", d.damping, damping)]:
+            checks += 1
+            if got != want:
+                failures.append("%s: %s = %r, expected %r"
+                                % (name, label, got, want))
+        for label, got, want in [("alpha", d.alpha, alpha),
+                                 ("omega0^2", d.omega0_squared, omega0_sq),
+                                 ("discriminant", d.discriminant, discriminant)]:
+            if want is None:
+                continue
+            checks += 1
+            if got != Fraction(want):
+                failures.append("%s: %s = %s, expected %s" % (name, label, got, want))
+        if roots is not None:
+            checks += 1
+            got = [r.exact for r in d.roots if hasattr(r, "exact")]
+            if sorted(got) != sorted(Fraction(r) for r in roots):
+                failures.append("%s: roots %s, expected %s" % (name, got, roots))
+
+    for netlist, want in TAU_CASES:
+        checks += 1
+        d = analyse(parse_netlist(netlist)).dynamics
+        if d.tau is None or d.tau.exact != want:
+            failures.append("tau = %s, expected %s" % (d.tau, want))
+
+    for netlist, element, quantity, want in SECOND_DERIVATIVE_CASES:
+        checks += 1
+        got = analyse(parse_netlist(netlist)).value("d2/dt2", element, quantity)
+        if got != Fraction(want):
+            failures.append("d2/dt2 %s(%s) = %s, expected %s"
+                            % (quantity, element, got, want))
+    return checks, failures
+
+
+# --------------------------------------------------------------------------
+# AC steady state. Hand-worked from Z = R + jwL and Z = 1/(jwC).
+# --------------------------------------------------------------------------
+
+AC_CASES = [
+    # series RL: Z = 3 + j4, so |Z| = 5 and the current lags by 53.13 degrees
+    ("series RL, w=1", ".ac 1\nV1 1 0 dc 10\nR1 1 2 3\nL1 2 0 4\n",
+     [("Z", "V1", Fraction(3), Fraction(4)),
+      ("I", "R1", Fraction(6, 5), Fraction(-8, 5))]),
+    # RC low-pass at w = 1/RC: output is exactly half the input, shifted -45
+    ("RC low-pass at the corner", ".ac 1\nV1 1 0 dc 1\nR1 1 2 1\nC1 2 0 1\n",
+     [("V", "C1", Fraction(1, 2), Fraction(-1, 2))]),
+    # series RLC at resonance: the reactances cancel, leaving R alone
+    ("series RLC at resonance",
+     ".ac 1\nV1 1 0 dc 5\nR1 1 2 2\nL1 2 3 1\nC1 3 0 1\n",
+     [("Z", "V1", Fraction(2), Fraction(0))]),
+    # a purely imaginary phasor stays exact
+    ("source at 90 degrees",
+     ".ac 1\nV1 1 0 dc 10 ac=10 phase=90\nR1 1 0 5\n",
+     [("I", "R1", Fraction(0), Fraction(2))]),
+]
+
+
+def run_ac():
+    failures = []
+    checks = 0
+    for name, netlist, expectations in AC_CASES:
+        circuit = parse_netlist(netlist)
+        result = analyse(circuit)
+        if result.ac is None:
+            failures.append("%s: no AC result was produced" % name)
+            continue
+        for kind, target, want_re, want_im in expectations:
+            checks += 1
+            if kind == "Z":
+                got = result.ac.impedances.get(target)
+            elif kind == "I":
+                got = result.ac.solution.element_current(circuit.get(target))
+            else:
+                got = result.ac.solution.element_voltage(circuit.get(target))
+            if got is None or got.re != want_re or got.im != want_im:
+                failures.append("%s: %s(%s) = %s, expected %s + j%s"
+                                % (name, kind, target,
+                                   got.rectangular() if got else "none",
+                                   want_re, want_im))
+    return checks, failures
 
 
 if __name__ == "__main__":

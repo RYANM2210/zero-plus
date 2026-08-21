@@ -33,6 +33,13 @@
       <div class="stage-bar">
         <span class="hint" id="stage-hint">Click to select, drag to move.</span>
         <span class="spacer"></span>
+        <label class="toggle" for="ac-enable">
+          <input type="checkbox" id="ac-enable">
+          AC steady state at
+        </label>
+        <input type="text" id="ac-omega" class="omega" value="1"
+               aria-label="Angular frequency in radians per second">
+        <span class="unit">rad/s</span>
         <span id="overlay-controls" hidden>
           <label class="toggle">
             <input type="checkbox" id="show-voltages">
@@ -69,6 +76,7 @@
 </dialog>
 
 <script src="solver.js"></script>
+<script src="extras.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

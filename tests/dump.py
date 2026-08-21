@@ -16,7 +16,14 @@ from analysis import AnalysisError, analyse
 from circuit import CircuitError, parse_netlist
 from test_cases import CASES, FAILURES
 
-PHASES = ["t<0", "0+", "d/dt", "inf"]
+PHASES = ["t<0", "0+", "d/dt", "d2/dt2", "inf"]
+
+
+def _root_text(root):
+    """A complex pair renders the same way in both languages."""
+    if isinstance(root, tuple):
+        return ",".join(str(part) for part in root)
+    return str(root)
 
 
 def exact(value):
@@ -47,6 +54,45 @@ def dump_one(netlist):
                 "i": exact(phase.solution.element_current(element)),
             }
         out["phases"][key] = entry
+
+    d = result.dynamics
+    if d is not None and d.order:
+        out["dynamics"] = {
+            "order": d.order,
+            "damping": d.damping or "",
+            "alpha": exact(d.alpha) if d.alpha is not None else "",
+            "omega0sq": exact(d.omega0_squared) if d.omega0_squared is not None else "",
+            "disc": exact(d.discriminant) if d.discriminant is not None else "",
+            "stable": bool(d.stable),
+            "poly": [exact(c) for c in d.polynomial],
+            "tau": str(d.tau) if d.tau is not None else "",
+            "roots": [_root_text(r) for r in d.roots],
+        }
+        out["responses"] = {
+            name: {q: form.formula for q, form in forms.items()}
+            for name, forms in result.responses.items()
+        }
+
+    if result.ac is not None:
+        circuit_nodes = {}
+        for node in circuit.nodes:
+            value = result.ac.solution.node_voltage(node)
+            circuit_nodes[node] = "%s|%s" % (exact(value.re), exact(value.im))
+        branches = {}
+        for element in circuit.elements:
+            v = result.ac.solution.element_voltage(element)
+            i = result.ac.solution.element_current(element)
+            branches[element.name] = {
+                "v": "%s|%s" % (exact(v.re), exact(v.im)),
+                "i": "%s|%s" % (exact(i.re), exact(i.im)),
+            }
+        out["ac"] = {
+            "omega": exact(result.ac.omega),
+            "nodes": circuit_nodes,
+            "branches": branches,
+            "z": {n: "%s|%s" % (exact(z.re), exact(z.im))
+                  for n, z in result.ac.impedances.items()},
+        }
     return out
 
 

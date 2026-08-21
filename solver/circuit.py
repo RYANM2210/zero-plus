@@ -63,7 +63,8 @@ class CircuitError(Exception):
 class Element(object):
     def __init__(self, kind, name, nodes, value=None, before=None, after=None,
                  ctrl_nodes=None, ctrl_element=None, gain=None,
-                 state_before=None, state_after=None, ic=None):
+                 state_before=None, state_after=None, ic=None, ac=None,
+                 phase=None):
         self.kind = kind
         self.name = name
         self.nodes = list(nodes)
@@ -76,6 +77,10 @@ class Element(object):
         self.state_before = state_before
         self.state_after = state_after
         self.ic = None if ic is None else to_fraction(ic)
+        # AC phasor, used only by the steady-state analysis. Left unset, a
+        # source is taken at its t > 0 value with zero phase.
+        self.ac = None if ac is None else to_fraction(ac)
+        self.phase = None if phase is None else to_fraction(phase)
 
     @property
     def is_storage(self):
@@ -102,6 +107,7 @@ class Circuit(object):
         self.title = title
         self.elements = []
         self._by_name = {}
+        self.ac_omega = None   # rad/s, set by a .ac line
 
     def add(self, element):
         if element.name in self._by_name:
@@ -273,6 +279,13 @@ def parse_netlist(text, title="circuit"):
         if line.lower().startswith(".title "):
             circuit.title = line[7:].strip()
             continue
+        if line.lower().startswith(".ac "):
+            try:
+                circuit.ac_omega = to_fraction(line[4:].strip())
+            except (ValueError, ZeroDivisionError):
+                raise CircuitError("line %d: .ac needs a frequency in rad/s"
+                                   % lineno)
+            continue
         if line.startswith("."):
             continue
         tokens = line.split()
@@ -293,9 +306,19 @@ def parse_netlist(text, title="circuit"):
             elif kind in ("V", "I"):
                 if len(rest) < 3:
                     raise CircuitError("%s needs two nodes and a value" % name)
-                before, after = _parse_source_spec(name, rest[2:])
-                circuit.add(Element(kind, name, rest[:2],
-                                    before=before, after=after))
+                ac = phase = None
+                body = []
+                for token in rest[2:]:
+                    lowered = token.lower()
+                    if lowered.startswith("ac="):
+                        ac = to_fraction(token[3:])
+                    elif lowered.startswith("phase="):
+                        phase = to_fraction(token[6:])
+                    else:
+                        body.append(token)
+                before, after = _parse_source_spec(name, body)
+                circuit.add(Element(kind, name, rest[:2], before=before,
+                                    after=after, ac=ac, phase=phase))
             elif kind == "SW":
                 if len(rest) != 4:
                     raise CircuitError(
@@ -328,6 +351,8 @@ def parse_netlist(text, title="circuit"):
 def to_netlist(circuit):
     """Round-trip a circuit back to netlist text (also the web save format)."""
     lines = [".title %s" % circuit.title]
+    if circuit.ac_omega is not None:
+        lines.append(".ac %s" % _num(circuit.ac_omega))
     for e in circuit.elements:
         if e.kind in ("R", "L", "C"):
             row = "%s %s %s %s" % (e.name, e.nodes[0], e.nodes[1], _num(e.value))
@@ -341,6 +366,10 @@ def to_netlist(circuit):
             else:
                 spec = "%s %s" % (_num(e.before), _num(e.after))
             row = "%s %s %s %s" % (e.name, e.nodes[0], e.nodes[1], spec)
+            if e.ac is not None:
+                row += " ac=%s" % _num(e.ac)
+            if e.phase is not None:
+                row += " phase=%s" % _num(e.phase)
         elif e.kind == "SW":
             row = "%s %s %s %s %s" % (e.name, e.nodes[0], e.nodes[1],
                                       e.state_before, e.state_after)

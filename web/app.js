@@ -42,7 +42,9 @@
     result: null,
     error: null,
     overlayPhase: '0+',
-    showVoltages: false
+    showVoltages: false,
+    acEnabled: false,
+    acOmega: '1'
   };
 
   let drag = null;
@@ -1058,8 +1060,24 @@
       return;
     }
 
+    let text = built.text;
+    if (state.acEnabled) {
+      const omega = String(state.acOmega || '').trim();
+      if (!omega) {
+        state.error = {
+          title: 'That frequency is missing',
+          items: ['Type an angular frequency in rad/s, or untick the AC box. '
+            + 'If the question gives you hertz, omega is 2*pi*f.']
+        };
+        renderResults();
+        syncStageBar();
+        return;
+      }
+      text = '.ac ' + omega + '\n' + text;
+    }
+
     try {
-      const circuit = S.parseNetlist(built.text, 'Your circuit');
+      const circuit = S.parseNetlist(text, 'Your circuit');
       state.result = S.analyse(circuit);
     } catch (error) {
       state.error = {
@@ -1080,16 +1098,21 @@
     't<0': 'Before the switch',
     '0+': 'The instant after',
     'd/dt': 'How fast it is changing',
+    'd2/dt2': 'How fast that is changing',
+    'd3/dt3': 'Third derivative',
     'inf': 'Long afterwards'
   };
   const PHASE_SUB = {
     't<0': 't < 0, steady state',
     '0+': 't = 0+',
     'd/dt': 'd/dt at t = 0+',
+    'd2/dt2': 'd²/dt² at t = 0+',
+    'd3/dt3': 'd³/dt³ at t = 0+',
     'inf': 't → ∞'
   };
   const PHASE_COLUMN = {
-    't<0': 't < 0', '0+': 't = 0+', 'd/dt': 'd/dt at 0+', 'inf': 't → ∞'
+    't<0': 't < 0', '0+': 't = 0+', 'd/dt': 'd/dt at 0+',
+    'd2/dt2': 'd²/dt² at 0+', 'd3/dt3': 'd³/dt³ at 0+', 'inf': 't → ∞'
   };
 
   function h(tag, className, text) {
@@ -1097,6 +1120,138 @@
     if (className) node.className = className;
     if (text !== undefined) node.textContent = text;
     return node;
+  }
+
+  function fact(list, term, value) {
+    const wrap = h('div', 'fact');
+    wrap.appendChild(h('dt', null, term));
+    wrap.appendChild(h('dd', null, value));
+    list.appendChild(wrap);
+  }
+
+  /* Damping, natural frequencies, and the complete response. */
+  function renderDynamics(result, host) {
+    const dynamics = result.dynamics;
+    if (!dynamics || !dynamics.order) return;
+
+    const card = h('div', 'answers');
+    card.appendChild(h('h2', null, 'How it gets there'));
+    card.appendChild(h('p', null,
+      'The shape of the response between those two ends.'));
+
+    if (dynamics.damping) {
+      const badge = h('span', 'damping',
+        S.DAMPING_LABELS[dynamics.damping] + (dynamics.order === 1
+          ? '' : ' — order ' + dynamics.order));
+      card.appendChild(badge);
+    }
+
+    const facts = h('div', 'facts');
+    if (dynamics.order === 1) {
+      if (dynamics.tau) {
+        fact(facts, 'time constant τ', String(dynamics.tau) + ' s');
+        fact(facts, 'natural frequency s', String(dynamics.roots[0]) + ' /s');
+      }
+    } else if (dynamics.order === 2) {
+      fact(facts, 'α (neper)', S.fmt(dynamics.alpha) + ' /s');
+      fact(facts, 'ω₀²', S.fmt(dynamics.omega0Squared));
+      if (dynamics.omega0) fact(facts, 'ω₀', String(dynamics.omega0) + ' rad/s');
+      if (dynamics.zeta) fact(facts, 'damping ratio ζ', String(dynamics.zeta));
+      fact(facts, 'α² − ω₀²', S.fmt(dynamics.discriminant));
+      if (dynamics.damping === 'underdamped') {
+        fact(facts, 'ω_d (damped)', String(dynamics.omegaD) + ' rad/s');
+        fact(facts, 'roots', '−' + S.fmt(dynamics.alpha) + ' ± j'
+          + String(dynamics.omegaD));
+      } else if (dynamics.damping === 'critical') {
+        fact(facts, 'repeated root', String(dynamics.roots[0]) + ' /s');
+      } else {
+        fact(facts, 'roots', String(dynamics.roots[0]) + ', '
+          + String(dynamics.roots[1]) + ' /s');
+      }
+    }
+    if (facts.children.length) card.appendChild(facts);
+
+    if (dynamics.order === 2) {
+      card.appendChild(h('p', null,
+        'The sign of α² − ω₀² decides the damping, and that comparison is exact, '
+        + 'so the classification above cannot be a rounding artefact.'));
+    }
+
+    const names = Object.keys(result.responses);
+    if (names.length) {
+      const box = h('div', 'formulas');
+      let approximate = false;
+      result.circuit.elements.forEach(function (element) {
+        const forms = result.responses[element.name];
+        if (!forms) return;
+        ['v', 'i'].forEach(function (quantity) {
+          const form = forms[quantity];
+          if (!form) return;
+          box.appendChild(h('div', null, form.formula));
+          approximate = approximate || !form.exact;
+        });
+      });
+      card.appendChild(box);
+      if (approximate) {
+        card.appendChild(h('p', null,
+          'Where a root is irrational its constants are shown to six figures. '
+          + 'α, ω₀² and the damping stay exact regardless.'));
+      }
+    }
+    host.appendChild(card);
+  }
+
+  /* AC steady state, when a frequency was given. */
+  function renderAc(result, host) {
+    const report = result.ac;
+    if (!report) return;
+    const circuit = result.circuit;
+
+    const card = h('div', 'answers');
+    card.appendChild(h('h2', null, 'AC steady state'));
+    card.appendChild(h('p', null,
+      'At ω = ' + S.fmt(report.omega) + ' rad/s. Every impedance is exact; only '
+      + 'the magnitude and angle of each answer are rounded, and the '
+      + 'rectangular form beside them is not.'));
+
+    report.notes.forEach(function (note) {
+      card.appendChild(h('p', null, note));
+    });
+
+    const wrap = h('div', 'table-wrap');
+    const table = h('table', 'grid');
+    const thead = document.createElement('thead');
+    const headRow = document.createElement('tr');
+    ['', 'Impedance', 'V (rectangular)', 'V (polar)', 'I (rectangular)',
+      'I (polar)'].forEach(function (title) {
+      headRow.appendChild(h('th', null, title));
+    });
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+
+    const tbody = document.createElement('tbody');
+    circuit.elements.forEach(function (element) {
+      const tr = document.createElement('tr');
+      tr.appendChild(h('td', 'name', element.name));
+      let z = '';
+      if (['R', 'L', 'C'].indexOf(element.kind) !== -1) {
+        z = S.impedance(element, report.omega).rectangular();
+      } else if (report.impedances[element.name]) {
+        z = 'sees ' + report.impedances[element.name].rectangular();
+      }
+      tr.appendChild(h('td', 'val', z || '—'));
+      const voltage = report.solution.elementVoltage(element);
+      const current = report.solution.elementCurrent(element);
+      tr.appendChild(h('td', 'val', voltage.rectangular()));
+      tr.appendChild(h('td', 'val', voltage.polar()));
+      tr.appendChild(h('td', 'val', current.rectangular()));
+      tr.appendChild(h('td', 'val', current.polar()));
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+    card.appendChild(wrap);
+    host.appendChild(card);
   }
 
   function renderResults() {
@@ -1159,6 +1314,9 @@
       card.appendChild(groups);
       host.appendChild(card);
     }
+
+    renderDynamics(result, host);
+    renderAc(result, host);
 
     const head = h('div', 'section-head');
     head.appendChild(h('h2', null, 'How it was worked out'));
@@ -1541,6 +1699,20 @@
     });
     document.getElementById('io-close').addEventListener('click', function () {
       document.getElementById('io-dialog').close();
+    });
+
+    const acEnable = document.getElementById('ac-enable');
+    const acOmega = document.getElementById('ac-omega');
+    acEnable.addEventListener('change', function () {
+      state.acEnabled = acEnable.checked;
+      acOmega.disabled = !state.acEnabled;
+    });
+    acOmega.disabled = true;
+    acOmega.addEventListener('change', function () {
+      state.acOmega = acOmega.value;
+    });
+    acOmega.addEventListener('input', function () {
+      state.acOmega = acOmega.value;
     });
 
     const toggle = document.getElementById('show-voltages');

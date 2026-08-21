@@ -1,0 +1,5 @@
+.title Series RL at 1 rad/s
+.ac 1
+V1 1 0 dc 10
+R1 1 2 3
+L1 2 0 4
